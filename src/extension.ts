@@ -372,7 +372,7 @@ function getWebviewContent(): string {
             .apply-button { margin-left: 0; padding: 2px 8px; font-size: 0.9em; background-color: var(--vscode-button-secondary-background); }
             #autocomplete-popup {
                 position: absolute; bottom: 100%; left: 0; width: calc(100% - 100px); /* Adjust width */
-                background-color: var(--vscode-editor-widget-background); border: 1px solid var(--vscode-widget-border);
+                background-color: #0c0c0c; border: 1px solid var(--vscode-widget-border);
                 border-radius: 4px; z-index: 1000; max-height: 150px; overflow-y: auto;
             }
             #autocomplete-popup div { padding: 5px 10px; cursor: pointer; }
@@ -664,7 +664,7 @@ function getWebviewContent(): string {
                     wrapper.className = 'collapsible-code-wrapper';
                     const header = document.createElement('div');
                     header.className = 'code-block-header';
-                    header.innerHTML = \`<span>Changes for: \${filePath || 'unknown file'}</span>\`;
+                    header.innerHTML = \`<span style="max-width: 80%; overflow-x: auto;">Changes for: \${filePath || 'unknown file'}</span>\`;
                     
                     if (filePath) {
                         const applyButton = document.createElement('button');
