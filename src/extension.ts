@@ -258,20 +258,20 @@ export function activate(context: vscode.ExtensionContext) {
 							const findHunkIndex = (sourceLines: string[], hunk: Hunk): number => {
 								const contextLines = hunk.lines.filter(l => l.type === 'context');
 								if (contextLines.length === 0 && hunk.lines.filter(l => l.type === 'remove').length > 0) {
-									const removeLines = hunk.lines.filter(l => l.type === 'remove').map(l => l.content.trim());
+									const removeLines = hunk.lines.filter(l => l.type === 'remove').map(l => l.content);
 									for (let i = 0; i <= sourceLines.length - removeLines.length; i++) {
 										const window = sourceLines.slice(i, i + removeLines.length);
-										if (window.every((line, index) => line.trim() === removeLines[index])) { return i; }
+										if (window.every((line, index) => line === removeLines[index])) { return i; }
 									}
 								}
 								if (contextLines.length === 0) { return -1; }
-								const searchSignature = contextLines.map(l => l.content.trim());
+								const searchSignature = contextLines.map(l => l.content);
 								for (let i = 0; i < sourceLines.length; i++) {
-									if (sourceLines[i].trim() === searchSignature[0]) {
+									if (sourceLines[i] === searchSignature[0]) {
 										let tempSourceIndex = i + 1;
 										let tempContextIndex = 1;
 										while (tempContextIndex < searchSignature.length && tempSourceIndex < sourceLines.length) {
-											if (sourceLines[tempSourceIndex].trim() === searchSignature[tempContextIndex]) {
+											if (sourceLines[tempSourceIndex] === searchSignature[tempContextIndex]) {
 												tempContextIndex++;
 											}
 											tempSourceIndex++;
@@ -712,8 +712,8 @@ function getWebviewContent(): string {
                     const lines = code.innerHTML.split('\\n');
                     const coloredContent = lines.map(line => {
                         const escapedLine = line.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                        if (escapedLine.trim().startsWith('+')) return \`<span class="diff-add">\${escapedLine}</span>\`;
-                        if (escapedLine.trim().startsWith('-')) return \`<span class="diff-del">\${escapedLine}</span>\`;
+                        if (escapedLine.startsWith('+')) return \`<span class="diff-add">\${escapedLine}</span>\`;
+                        if (escapedLine.startsWith('-')) return \`<span class="diff-del">\${escapedLine}</span>\`;
                         return escapedLine;
                     }).join('\\n');
                     code.innerHTML = coloredContent;
