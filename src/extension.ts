@@ -5,105 +5,158 @@ import * as path from 'path';
 const TAG = 'Gemini Diff Generator';
 
 export function activate(context: vscode.ExtensionContext) {
-    // Keep track of the last active editor and if a generation is in progress
-    let lastActiveEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor;
-    let isGenerationCancelled = false;
+	// Keep track of the last active editor and if a generation is in progress
+	let lastActiveEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor;
+	let isGenerationCancelled = false;
 
-    // Update the last active editor whenever it changes
-    context.subscriptions.push(
-        vscode.window.onDidChangeActiveTextEditor(editor => {
-            if (editor) {
-                lastActiveEditor = editor;
-            }
-        })
-    );
+	let activeDiffUris: { original: vscode.Uri, patched: vscode.Uri } | null = null;
 
-    let disposable = vscode.commands.registerCommand('gemini-diff-generator.start', () => {
-        const panel = vscode.window.createWebviewPanel(
-            'geminiChat',
-            'Gemini Diff Generator',
-            vscode.ViewColumn.Two,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true, // Retain context when webview is hidden
-            }
-        );
+	// Update the last active editor whenever it changes
+	context.subscriptions.push(
+		vscode.window.onDidChangeActiveTextEditor(editor => {
+			if (editor) {
+				lastActiveEditor = editor;
+			}
 
-        // Send the initial file context to the webview
-        if (lastActiveEditor) {
-            const relativePath = vscode.workspace.asRelativePath(lastActiveEditor.document.uri);
-            panel.webview.postMessage({ command: 'updateActiveFile', filePath: relativePath });
-        }
+			if (activeDiffUris) {
+				const visibleEditors = vscode.window.visibleTextEditors;
+				const isDiffStillVisible = visibleEditors.some(e => e.document.uri === activeDiffUris?.patched);
+				if (!isDiffStillVisible) {
+					activeDiffUris = null;
+					vscode.commands.executeCommand('setContext', 'geminiDiffGenerator.diffVisible', false);
+				}
+			}
+		})
+	);
 
-        // Update context in the webview if the editor changes while the panel is visible
-        const editorChangeSubscription = vscode.window.onDidChangeActiveTextEditor(editor => {
-            if (editor && panel.visible) {
-                lastActiveEditor = editor;
-                const relativePath = vscode.workspace.asRelativePath(editor.document.uri);
-                panel.webview.postMessage({ command: 'updateActiveFile', filePath: relativePath });
-            }
-        });
+	let acceptDiffCommand = vscode.commands.registerCommand('gemini-diff-generator.acceptDiff', async () => {
+		if (!activeDiffUris) {
+			vscode.window.showErrorMessage("No active Gemini diff to apply.");
+			return;
+		}
 
-        panel.onDidDispose(() => {
-            editorChangeSubscription.dispose();
-        });
+		try {
+			// Find the two documents from our stored URIs
+			const originalDoc = await vscode.workspace.openTextDocument(activeDiffUris.original);
+			const patchedDoc = vscode.workspace.textDocuments.find(doc => doc.uri.toString() === activeDiffUris!.patched.toString());
 
-        panel.webview.html = getWebviewContent();
+			if (!patchedDoc) {
+				throw new Error("Could not find the patched document. It may have been closed.");
+			}
 
-        panel.webview.onDidReceiveMessage(
-            async message => {
-                switch (message.command) {
-                    case 'getWorkspaceFiles': {
-                        const query = message.query;
-                        if (!query) {return;}
+			const finalContent = patchedDoc.getText();
+			const edit = new vscode.WorkspaceEdit();
+			const fullRange = new vscode.Range(
+				originalDoc.positionAt(0),
+				originalDoc.positionAt(originalDoc.getText().length)
+			);
 
-                        // Find files, excluding node_modules and .git
-                        const files = await vscode.workspace.findFiles(`**/*${query}*`, '**/{node_modules,.git}/**');
-                        
-                        const relativePaths = files.map(file => 
-                            vscode.workspace.asRelativePath(file)
-                        ).slice(0, 10); // Limit to 10 suggestions for performance
+			// Replace original content with the final content from the diff view
+			edit.replace(originalDoc.uri, fullRange, finalContent);
+			await vscode.workspace.applyEdit(edit);
 
-                        panel.webview.postMessage({ command: 'fileSuggestions', suggestions: relativePaths });
-                        return;
-                    }
-                    case 'sendMessage': {
-                        isGenerationCancelled = false;
+			// Close the diff editor tab
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
 
-                        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (!workspaceFolder) {
-                            vscode.window.showErrorMessage("Please open a workspace to use this feature.");
-                            return;
-                        }
+			vscode.window.showInformationMessage("Changes applied successfully.");
 
-                        const userQuery = message.text;
-                        const contextFiles = message.contextFiles as string[]; // Added files via @
-                        const activeFile = message.activeFile as string; // The currently viewed file
+		} catch (e) {
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			vscode.window.showErrorMessage(`Failed to apply changes: ${errorMessage}`);
+		} finally {
+			// Reset state
+			activeDiffUris = null;
+			vscode.commands.executeCommand('setContext', 'geminiDiffGenerator.diffVisible', false);
+		}
+	});
+	context.subscriptions.push(acceptDiffCommand);
 
-                        const apiKey = vscode.workspace.getConfiguration('gemini-diff-generator').get('apiKey');
-                        if (!apiKey || typeof apiKey !== 'string' || apiKey === '') {
-                            vscode.window.showErrorMessage('Gemini API key not configured. Please set it in the settings.');
-                            panel.webview.postMessage({ command: 'generationComplete' });
-                            return;
-                        }
+	let disposable = vscode.commands.registerCommand('gemini-diff-generator.start', () => {
+		const panel = vscode.window.createWebviewPanel(
+			'geminiChat',
+			'Gemini Diff Generator',
+			vscode.ViewColumn.Two,
+			{
+				enableScripts: true,
+				retainContextWhenHidden: true, // Retain context when webview is hidden
+			}
+		);
 
-                        let promptContext = '';
-                        const allContextFiles = Array.from(new Set([activeFile, ...contextFiles]));
+		// Send the initial file context to the webview
+		if (lastActiveEditor) {
+			const relativePath = vscode.workspace.asRelativePath(lastActiveEditor.document.uri);
+			panel.webview.postMessage({ command: 'updateActiveFile', filePath: relativePath });
+		}
 
-                        for (const relativePath of allContextFiles) {
-                            try {
-                                const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, relativePath);
-                                const fileContentBytes = await vscode.workspace.fs.readFile(fileUri);
-                                const fileContent = Buffer.from(fileContentBytes).toString('utf8');
-                                promptContext += `--- File: ${relativePath} ---\n${fileContent}\n--- End File: ${relativePath} ---\n\n`;
-                            } catch (e) {
-                                console.error(`Could not read file for context: ${relativePath}`, e);
-                                promptContext += `--- File: ${relativePath} ---\n[Could not read file content]\n--- End File: ${relativePath} ---\n\n`;
-                            }
-                        }
+		// Update context in the webview if the editor changes while the panel is visible
+		const editorChangeSubscription = vscode.window.onDidChangeActiveTextEditor(editor => {
+			if (editor && panel.visible) {
+				lastActiveEditor = editor;
+				const relativePath = vscode.workspace.asRelativePath(editor.document.uri);
+				panel.webview.postMessage({ command: 'updateActiveFile', filePath: relativePath });
+			}
+		});
 
-                        const genAI = new GoogleGenAI({ apiKey });
-                        const prompt = `
+		panel.onDidDispose(() => {
+			editorChangeSubscription.dispose();
+		});
+
+		panel.webview.html = getWebviewContent();
+
+		panel.webview.onDidReceiveMessage(
+			async message => {
+				switch (message.command) {
+					case 'getWorkspaceFiles': {
+						const query = message.query;
+						if (!query) { return; }
+
+						// Find files, excluding node_modules and .git
+						const files = await vscode.workspace.findFiles(`**/*${query}*`, '**/{node_modules,.git}/**');
+
+						const relativePaths = files.map(file =>
+							vscode.workspace.asRelativePath(file)
+						).slice(0, 10); // Limit to 10 suggestions for performance
+
+						panel.webview.postMessage({ command: 'fileSuggestions', suggestions: relativePaths });
+						return;
+					}
+					case 'sendMessage': {
+						isGenerationCancelled = false;
+
+						const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+						if (!workspaceFolder) {
+							vscode.window.showErrorMessage("Please open a workspace to use this feature.");
+							return;
+						}
+
+						const userQuery = message.text;
+						const contextFiles = message.contextFiles as string[]; // Added files via @
+						const activeFile = message.activeFile as string; // The currently viewed file
+
+						const apiKey = vscode.workspace.getConfiguration('gemini-diff-generator').get('apiKey');
+						if (!apiKey || typeof apiKey !== 'string' || apiKey === '') {
+							vscode.window.showErrorMessage('Gemini API key not configured. Please set it in the settings.');
+							panel.webview.postMessage({ command: 'generationComplete' });
+							return;
+						}
+
+						let promptContext = '';
+						const allContextFiles = Array.from(new Set([activeFile, ...contextFiles]));
+
+						for (const relativePath of allContextFiles) {
+							try {
+								const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, relativePath);
+								const fileContentBytes = await vscode.workspace.fs.readFile(fileUri);
+								const fileContent = Buffer.from(fileContentBytes).toString('utf8');
+								promptContext += `--- File: ${relativePath} ---\n${fileContent}\n--- End File: ${relativePath} ---\n\n`;
+							} catch (e) {
+								console.error(`Could not read file for context: ${relativePath}`, e);
+								promptContext += `--- File: ${relativePath} ---\n[Could not read file content]\n--- End File: ${relativePath} ---\n\n`;
+							}
+						}
+
+						const genAI = new GoogleGenAI({ apiKey });
+						const prompt = `
                             You are an expert programmer. Your task is to respond to the user's request based on the provided file contexts.
                             
                             ${promptContext}
@@ -127,182 +180,187 @@ export function activate(context: vscode.ExtensionContext) {
                             If you are not suggesting changes to any files, do not generate a diff.
                         `;
 
-                        try {
-                            const request = {
-                                model: "gemini-2.5-pro",
-                                contents: prompt,
-                                config: { thinkingConfig: { includeThoughts: true } },
-                            };
-                            
-                            const result = await genAI.models.generateContentStream(request);
+						try {
+							const request = {
+								model: "gemini-2.5-pro",
+								contents: prompt,
+								config: { thinkingConfig: { includeThoughts: true } },
+							};
 
-                            for await (const chunk of result) {
-                                if (isGenerationCancelled) {break;}
-                                if (chunk.candidates && chunk.candidates[0]?.content?.parts) {
-                                    for (const part of chunk.candidates[0].content.parts) {
-                                        if (!part.text) {continue;}
-                                        if (part.thought) {
-                                            panel.webview.postMessage({ command: 'streamThought', text: part.text });
-                                        } else {
-                                            panel.webview.postMessage({ command: 'streamResponse', text: part.text });
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (error) {
-                            const errorMessage = error instanceof Error ? error.message : "An unknown error occurred.";
-                            vscode.window.showErrorMessage(`Error communicating with Gemini API: ${errorMessage}`);
-                            console.error(error);
-                        } finally {
-                            panel.webview.postMessage({ command: 'generationComplete', cancelled: isGenerationCancelled });
-                        }
-                        return;
-                    }
-                    case 'stopGeneration': {
-                        isGenerationCancelled = true;
-                        return;
-                    }
-                    case 'applyDiff': {
-                        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-                        if (!workspaceFolder) {
-                            vscode.window.showErrorMessage("No active workspace folder found to apply diff to.");
-                            return;
-                        }
+							const result = await genAI.models.generateContentStream(request);
 
-                        try {
-                            const targetPath = message.filePath;
-                            const diffContent = message.diff;
-                            const targetUri = vscode.Uri.joinPath(workspaceFolder.uri, targetPath);
-                            
-                            let document;
-                            try {
-                                document = await vscode.workspace.openTextDocument(targetUri);
-                            } catch (e) {
-                                throw new Error(`File not found in workspace: ${targetPath}`);
-                            }
-                            
-                            const originalContent = document.getText();
-                            
-                            interface HunkLine { type: 'add' | 'remove' | 'context'; content: string; }
-                            interface Hunk { lines: HunkLine[]; }
+							for await (const chunk of result) {
+								if (isGenerationCancelled) { break; }
+								if (chunk.candidates && chunk.candidates[0]?.content?.parts) {
+									for (const part of chunk.candidates[0].content.parts) {
+										if (!part.text) { continue; }
+										if (part.thought) {
+											panel.webview.postMessage({ command: 'streamThought', text: part.text });
+										} else {
+											panel.webview.postMessage({ command: 'streamResponse', text: part.text });
+										}
+									}
+								}
+							}
+						} catch (error) {
+							const errorMessage = error instanceof Error ? error.message : "An unknown error occurred.";
+							vscode.window.showErrorMessage(`Error communicating with Gemini API: ${errorMessage}`);
+							console.error(error);
+						} finally {
+							panel.webview.postMessage({ command: 'generationComplete', cancelled: isGenerationCancelled });
+						}
+						return;
+					}
+					case 'stopGeneration': {
+						isGenerationCancelled = true;
+						return;
+					}
+					case 'applyDiff': {
+						const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+						if (!workspaceFolder) {
+							vscode.window.showErrorMessage("No active workspace folder found to apply diff to.");
+							return;
+						}
 
-                            const parseDiffToHunks = (diff: string): Hunk[] => {
-                                const hunks: Hunk[] = [];
-                                let currentHunk: Hunk | null = null;
-                                for (const line of diff.split('\n')) {
-                                    if (line.startsWith('@@')) {
-                                        if (currentHunk) {hunks.push(currentHunk);}
-                                        currentHunk = { lines: [] };
-                                    } else if (currentHunk && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
-                                        const type = line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'context';
-                                        currentHunk.lines.push({ type, content: line.substring(1) });
-                                    }
-                                }
-                                if (currentHunk) {hunks.push(currentHunk);}
-                                return hunks;
-                            };
+						try {
+							const targetPath = message.filePath;
+							const diffContent = message.diff;
+							const targetUri = vscode.Uri.joinPath(workspaceFolder.uri, targetPath);
 
-                            const findHunkIndex = (sourceLines: string[], hunk: Hunk): number => {
-                                const contextLines = hunk.lines.filter(l => l.type === 'context');
-                                if (contextLines.length === 0 && hunk.lines.filter(l => l.type === 'remove').length > 0) {
-                                    const removeLines = hunk.lines.filter(l => l.type === 'remove').map(l => l.content.trim());
-                                    for (let i = 0; i <= sourceLines.length - removeLines.length; i++) {
-                                        const window = sourceLines.slice(i, i + removeLines.length);
-                                        if (window.every((line, index) => line.trim() === removeLines[index])) {return i;}
-                                    }
-                                }
-                                if (contextLines.length === 0) {return -1;}
-                                const searchSignature = contextLines.map(l => l.content.trim());
-                                for (let i = 0; i < sourceLines.length; i++) {
-                                    if (sourceLines[i].trim() === searchSignature[0]) {
-                                        let tempSourceIndex = i + 1;
-                                        let tempContextIndex = 1;
-                                        while (tempContextIndex < searchSignature.length && tempSourceIndex < sourceLines.length) {
-                                            if (sourceLines[tempSourceIndex].trim() === searchSignature[tempContextIndex]) {
-                                                tempContextIndex++;
-                                            }
-                                            tempSourceIndex++;
-                                        }
-                                        if (tempContextIndex === searchSignature.length) {return i;}
-                                    }
-                                }
-                                return -1;
-                            };
+							let document;
+							try {
+								document = await vscode.workspace.openTextDocument(targetUri);
+							} catch (e) {
+								throw new Error(`File not found in workspace: ${targetPath}`);
+							}
 
-                            const firstHunkIndex = diffContent.indexOf('@@');
-                            if (firstHunkIndex === -1) {throw new Error("Diff does not contain any valid hunks.");}
-                            const cleanDiff = diffContent.substring(firstHunkIndex);
+							const originalContent = document.getText();
 
-                            const hunks = parseDiffToHunks(cleanDiff);
-                            const originalLines = originalContent.split('\n');
-                            const hunkStartLocations = new Map<number, Hunk>();
-                            let successfulHunks = 0;
+							interface HunkLine { type: 'add' | 'remove' | 'context'; content: string; }
+							interface Hunk { lines: HunkLine[]; }
 
-                            for (const hunk of hunks) {
-                                const index = findHunkIndex(originalLines, hunk);
-                                if (index !== -1) {
-                                    hunkStartLocations.set(index, hunk);
-                                    successfulHunks++;
-                                }
-                            }
+							const parseDiffToHunks = (diff: string): Hunk[] => {
+								const hunks: Hunk[] = [];
+								let currentHunk: Hunk | null = null;
+								for (const line of diff.split('\n')) {
+									if (line.startsWith('@@')) {
+										if (currentHunk) { hunks.push(currentHunk); }
+										currentHunk = { lines: [] };
+									} else if (currentHunk && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
+										const type = line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'context';
+										currentHunk.lines.push({ type, content: line.substring(1) });
+									}
+								}
+								if (currentHunk) { hunks.push(currentHunk); }
+								return hunks;
+							};
 
-                            const patchedLines: string[] = [];
-                            for (let i = 0; i < originalLines.length;) {
-                                if (hunkStartLocations.has(i)) {
-                                    const hunk = hunkStartLocations.get(i)!;
-                                    hunk.lines.forEach(line => {
-                                        if (line.type !== 'remove') {patchedLines.push(line.content);}
-                                    });
-                                    i += hunk.lines.filter(l => l.type !== 'add').length;
-                                } else {
-                                    patchedLines.push(originalLines[i]);
-                                    i++;
-                                }
-                            }
+							const findHunkIndex = (sourceLines: string[], hunk: Hunk): number => {
+								const contextLines = hunk.lines.filter(l => l.type === 'context');
+								if (contextLines.length === 0 && hunk.lines.filter(l => l.type === 'remove').length > 0) {
+									const removeLines = hunk.lines.filter(l => l.type === 'remove').map(l => l.content.trim());
+									for (let i = 0; i <= sourceLines.length - removeLines.length; i++) {
+										const window = sourceLines.slice(i, i + removeLines.length);
+										if (window.every((line, index) => line.trim() === removeLines[index])) { return i; }
+									}
+								}
+								if (contextLines.length === 0) { return -1; }
+								const searchSignature = contextLines.map(l => l.content.trim());
+								for (let i = 0; i < sourceLines.length; i++) {
+									if (sourceLines[i].trim() === searchSignature[0]) {
+										let tempSourceIndex = i + 1;
+										let tempContextIndex = 1;
+										while (tempContextIndex < searchSignature.length && tempSourceIndex < sourceLines.length) {
+											if (sourceLines[tempSourceIndex].trim() === searchSignature[tempContextIndex]) {
+												tempContextIndex++;
+											}
+											tempSourceIndex++;
+										}
+										if (tempContextIndex === searchSignature.length) { return i; }
+									}
+								}
+								return -1;
+							};
 
-                            if (successfulHunks < hunks.length) {
-                                vscode.window.showWarningMessage(`Could only apply ${successfulHunks} of ${hunks.length} changes for ${targetPath}. Please review carefully.`);
-                            }
+							const firstHunkIndex = diffContent.indexOf('@@');
+							if (firstHunkIndex === -1) { throw new Error("Diff does not contain any valid hunks."); }
+							const cleanDiff = diffContent.substring(firstHunkIndex);
 
-                            const patchedContent = patchedLines.join('\n');
-                            const patchedDoc = await vscode.workspace.openTextDocument({ content: patchedContent, language: document.languageId });
+							const hunks = parseDiffToHunks(cleanDiff);
+							const originalLines = originalContent.split('\n');
+							const hunkStartLocations = new Map<number, Hunk>();
+							let successfulHunks = 0;
 
-                            const diffTitle = `Review Changes for ${path.basename(targetPath)}`;
-                            await vscode.commands.executeCommand('vscode.diff', document.uri, patchedDoc.uri, diffTitle);
+							for (const hunk of hunks) {
+								const index = findHunkIndex(originalLines, hunk);
+								if (index !== -1) {
+									hunkStartLocations.set(index, hunk);
+									successfulHunks++;
+								}
+							}
 
-                            const selection = await vscode.window.showInformationMessage(
-                                `Review changes for ${targetPath}. You can edit the right side before accepting.`,
-                                { modal: true }, '✅ Accept & Apply'
-                            );
+							const patchedLines: string[] = [];
+							for (let i = 0; i < originalLines.length;) {
+								if (hunkStartLocations.has(i)) {
+									const hunk = hunkStartLocations.get(i)!;
+									hunk.lines.forEach(line => {
+										if (line.type !== 'remove') { patchedLines.push(line.content); }
+									});
+									i += hunk.lines.filter(l => l.type !== 'add').length;
+								} else {
+									patchedLines.push(originalLines[i]);
+									i++;
+								}
+							}
 
-                            if (selection === '✅ Accept & Apply') {
-                                const finalContent = patchedDoc.getText();
-                                const edit = new vscode.WorkspaceEdit();
-                                const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(originalContent.length));
-                                edit.replace(document.uri, fullRange, finalContent);
-                                await vscode.workspace.applyEdit(edit);
-                                await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-                            }
-                        }
-                        catch (e) {
-                            const errorMessage = e instanceof Error ? e.message : String(e);
-                            console.error("Failed to apply patch:", errorMessage);
-                            vscode.window.showErrorMessage(`Failed to apply the patch: ${errorMessage}`);
-                        }
-                        return;
-                    }
-                }
-            },
-            undefined,
-            context.subscriptions
-        );
-    });
+							if (successfulHunks < hunks.length) {
+								vscode.window.showWarningMessage(`Could only apply ${successfulHunks} of ${hunks.length} changes for ${targetPath}. Please review carefully.`);
+							}
 
-    context.subscriptions.push(disposable);
+							const patchedContent = patchedLines.join('\n');
+							const patchedDoc = await vscode.workspace.openTextDocument({ content: patchedContent, language: document.languageId });
+
+							activeDiffUris = { original: document.uri, patched: patchedDoc.uri };
+							vscode.commands.executeCommand('setContext', 'geminiDiffGenerator.diffVisible', true);
+
+							const diffTitle = `Review Changes for ${path.basename(targetPath)}`;
+							await vscode.commands.executeCommand('vscode.diff', document.uri, patchedDoc.uri, diffTitle);
+
+							// const selection = await vscode.window.showInformationMessage(
+							// 	`Review changes for ${targetPath}. You can edit the right side before accepting.`,
+							// 	{ modal: true }, '✅ Accept & Apply'
+							// );
+
+							// if (selection === '✅ Accept & Apply') {
+							// 	const finalContent = patchedDoc.getText();
+							// 	const edit = new vscode.WorkspaceEdit();
+							// 	const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(originalContent.length));
+							// 	edit.replace(document.uri, fullRange, finalContent);
+							// 	await vscode.workspace.applyEdit(edit);
+							// 	await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+							// }
+						}
+						catch (e) {
+							const errorMessage = e instanceof Error ? e.message : String(e);
+							console.error("Failed to apply patch:", errorMessage);
+							vscode.window.showErrorMessage(`Failed to apply the patch: ${errorMessage}`);
+                            activeDiffUris = null;
+                            vscode.commands.executeCommand('setContext', 'geminiDiffGenerator.diffVisible', false);							
+						}
+						return;
+					}
+				}
+			},
+			undefined,
+			context.subscriptions
+		);
+	});
+
+	context.subscriptions.push(disposable);
 }
 
 function getWebviewContent(): string {
-    return `<!DOCTYPE html>
+	return `<!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">

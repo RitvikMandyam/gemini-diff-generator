@@ -18,6 +18,11 @@
       {
         "command": "gemini-diff-generator.start",
         "title": "Start Gemini Diff Generator"
+      },
+      {
+        "command": "gemini-diff-generator.acceptDiff",
+        "title": "Accept Changes",
+        "icon": "$(check)"
       }
     ],
     "configuration": {
@@ -29,6 +34,15 @@
           "description": "Your Google AI Studio API Key for Gemini."
         }
       }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "gemini-diff-generator.acceptDiff",
+          "when": "geminiDiffGenerator.diffVisible",
+          "group": "navigation"
+        }
+      ]
     }
   },
   "scripts": {
