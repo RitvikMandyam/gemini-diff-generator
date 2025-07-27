@@ -184,7 +184,7 @@ export function activate(context: vscode.ExtensionContext) {
 							const request = {
 								model: "gemini-2.5-pro",
 								contents: prompt,
-								config: { thinkingConfig: { includeThoughts: true } },
+								config: { thinkingConfig: { includeThoughts: true, thinkingBudget: 8192 } },
 							};
 
 							const result = await genAI.models.generateContentStream(request);
